@@ -10,6 +10,7 @@ def connect_to_outlook():
         namespace = outlook.GetNamespace("MAPI")
         calendar_folder = namespace.GetDefaultFolder(9)  # 9 = Calendar
         print(f"Connected to Outlook calendar: {calendar_folder.Name}")
+        print(f"Total items in calendar: {calendar_folder.Items.Count}")
         return calendar_folder
     except Exception as e:
         print(f"Error connecting to Outlook: {e}")
@@ -22,131 +23,137 @@ def get_appointments_in_range(calendar_folder, start_date, end_date):
     try:
         # Get calendar items
         items = calendar_folder.Items
+        print(f"Total calendar items before filtering: {items.Count}")
         
         # Important: Sort items by start date to optimize filtering
         items.Sort("[Start]")
         items.IncludeRecurrences = True
         
-        # Find appointments one month at a time to limit processing
-        current_month_start = start_date.replace(day=1)
-        appointments = []
+        # DEBUG: Try to get at least one item to verify access
+        if items.Count > 0:
+            try:
+                first_item = items.GetFirst()
+                print(f"DEBUG: First item subject: {first_item.Subject}")
+                print(f"DEBUG: First item start: {first_item.Start}")
+            except Exception as e:
+                print(f"DEBUG: Error accessing first item: {e}")
         
-        while current_month_start <= end_date:
-            # Calculate end of month
-            if current_month_start.month == 12:
-                next_month = current_month_start.replace(year=current_month_start.year + 1, month=1)
-            else:
-                next_month = current_month_start.replace(month=current_month_start.month + 1)
-            
-            month_end = next_month - timedelta(seconds=1)
-            
-            # If month_end is beyond our end_date, cap it
-            if month_end > end_date:
-                month_end = end_date
-            
-            print(f"Processing calendar for {current_month_start.strftime('%B %Y')}...")
-            
-            # Create a filter for just this month
-            month_start_str = current_month_start.strftime("%m/%d/%Y")
-            month_end_str = month_end.strftime("%m/%d/%Y")
-            
-            # Try different date formats for filtering
-            filter_attempts = [
-                f"[Start] >= '{month_start_str}' AND [Start] <= '{month_end_str}'",
-                f"[Start] >= '{current_month_start.strftime('%d/%m/%Y')}' AND [Start] <= '{month_end.strftime('%d/%m/%Y')}'",
-                f"[Start] >= '{current_month_start.strftime('%Y-%m-%d')}' AND [Start] <= '{month_end.strftime('%Y-%m-%d')}'"
-            ]
-            
-            month_items = None
-            for filter_str in filter_attempts:
-                try:
-                    print(f"Trying filter: {filter_str}")
-                    month_items = items.Restrict(filter_str)
-                    # If we get here without error, exit the loop
+        # DEBUG: Get some sample items directly
+        print("\nDEBUG: Sampling calendar items directly (without filter):")
+        sample_count = 0
+        for item in items:
+            try:
+                if sample_count < 5:  # Just check the first 5 items
+                    print(f"DEBUG: Item {sample_count+1}: {item.Subject}, Start: {item.Start}")
+                    sample_count += 1
+                else:
                     break
-                except:
-                    continue
-            
-            # If all filter attempts failed, get items directly and filter manually
-            if month_items is None:
-                print("Filter failed, using manual method for this month...")
-                month_items = items
-                
-            # Process this month's appointments
-            month_appts = []
-            item_count = 0
-            
-            for item in month_items:
-                item_count += 1
-                if item_count % 100 == 0:
-                    print(f"Processed {item_count} items...")
-                
-                try:
-                    # Extract start time
-                    start_time = None
-                    try:
-                        start_time = item.Start
-                        if isinstance(start_time, str):
-                            start_time = pd.to_datetime(start_time)
-                    except:
-                        continue  # Skip if we can't get a start time
-                    
-                    # Manual filter if needed
-                    if month_items == items:  # If we're using the full calendar
-                        if not (current_month_start <= start_time <= month_end):
-                            continue
-                    
-                    # Only include appointments within our overall date range
-                    if not (start_date <= start_time <= end_date):
-                        continue
-                    
-                    # Extract end time
-                    end_time = None
-                    try:
-                        end_time = item.End
-                        if isinstance(end_time, str):
-                            end_time = pd.to_datetime(end_time)
-                    except:
-                        # If we can't get end time, estimate it
-                        try:
-                            end_time = start_time + timedelta(minutes=item.Duration)
-                        except:
-                            end_time = start_time + timedelta(hours=1)
-                    
-                    # Calculate duration in hours
-                    try:
-                        duration = (end_time - start_time).total_seconds() / 3600
-                    except:
-                        try:
-                            duration = item.Duration / 60  # Minutes to hours
-                        except:
-                            duration = 1.0  # Default 1 hour
-                    
-                    # Get category (or set default)
-                    try:
-                        category = item.Categories if item.Categories else "Uncategorized"
-                    except:
-                        category = "Uncategorized"
-                    
-                    # Add to our list
-                    month_appts.append({
-                        'Subject': item.Subject,
-                        'Start': start_time,
-                        'End': end_time,
-                        'Duration': duration,
-                        'Category': category
-                    })
-                except Exception as e:
-                    # Skip problematic items
-                    continue
-            
-            print(f"Found {len(month_appts)} appointments in {current_month_start.strftime('%B %Y')}")
-            appointments.extend(month_appts)
-            
-            # Move to next month
-            current_month_start = next_month
+            except Exception as e:
+                print(f"DEBUG: Error accessing sample item: {e}")
+                continue
         
-        print(f"Total appointments found: {len(appointments)}")
+        # Use a simpler, more reliable approach - iterate through all items and filter manually
+        print("\nUsing manual filtering approach...")
+        appointments = []
+        processed_count = 0
+        found_count = 0
+        
+        for item in items:
+            processed_count += 1
+            if processed_count % 100 == 0:
+                print(f"Processed {processed_count} items...")
+            
+            try:
+                # Get the start time
+                start_time = None
+                try:
+                    start_time = item.Start
+                    if isinstance(start_time, str):
+                        start_time = pd.to_datetime(start_time)
+                except Exception as e:
+                    print(f"DEBUG: Error getting start time: {e}")
+                    continue
+                
+                # DEBUG: Print date to ensure correct format handling
+                if processed_count < 10:
+                    print(f"DEBUG: Item {processed_count} start_time: {start_time}")
+                    print(f"DEBUG: Type of start_time: {type(start_time)}")
+                
+                # Convert to Python datetime if it's a COM datetime
+                if hasattr(start_time, 'year'):  # Outlook datetime object
+                    start_time = datetime(
+                        year=start_time.year,
+                        month=start_time.month,
+                        day=start_time.day,
+                        hour=start_time.hour,
+                        minute=start_time.minute,
+                        second=start_time.second
+                    )
+                
+                # Check if in date range
+                if not (start_date <= start_time <= end_date):
+                    if processed_count < 10:
+                        print(f"DEBUG: Item outside date range. Item date: {start_time}")
+                    continue
+                
+                # Extract end time
+                end_time = None
+                try:
+                    end_time = item.End
+                    if isinstance(end_time, str):
+                        end_time = pd.to_datetime(end_time)
+                    
+                    # Convert to Python datetime if it's a COM datetime
+                    if hasattr(end_time, 'year'):
+                        end_time = datetime(
+                            year=end_time.year,
+                            month=end_time.month,
+                            day=end_time.day,
+                            hour=end_time.hour,
+                            minute=end_time.minute,
+                            second=end_time.second
+                        )
+                except:
+                    # If we can't get end time, estimate it
+                    try:
+                        end_time = start_time + timedelta(minutes=item.Duration)
+                    except:
+                        end_time = start_time + timedelta(hours=1)
+                
+                # Calculate duration in hours
+                try:
+                    duration = (end_time - start_time).total_seconds() / 3600
+                except:
+                    try:
+                        duration = item.Duration / 60  # Minutes to hours
+                    except:
+                        duration = 1.0  # Default 1 hour
+                
+                # Get category (or set default)
+                try:
+                    category = item.Categories if item.Categories else "Uncategorized"
+                except:
+                    category = "Uncategorized"
+                
+                # DEBUG: Print found item
+                print(f"FOUND: {item.Subject}, Start: {start_time}, Duration: {duration:.2f} hours")
+                
+                # Add to our list
+                appointments.append({
+                    'Subject': item.Subject,
+                    'Start': start_time,
+                    'End': end_time,
+                    'Duration': duration,
+                    'Category': category
+                })
+                found_count += 1
+            except Exception as e:
+                if processed_count < 20:
+                    print(f"DEBUG: Error processing item {processed_count}: {e}")
+                continue
+        
+        print(f"\nTotal items processed: {processed_count}")
+        print(f"Total appointments found in date range: {found_count}")
         return appointments
     
     except Exception as e:
