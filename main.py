@@ -29,8 +29,13 @@ def get_appointments_in_range(calendar_folder, start_date, end_date):
         items.Sort("[Start]")
         items.IncludeRecurrences = True
         
-        # Use a restriction to filter by date range
-        restriction = f"[Start] >= '{start_date.strftime('%m/%d/%Y')}' AND [Start] <= '{end_date.strftime('%m/%d/%Y')}'"
+        # Format dates for the Outlook filter
+        start_str = start_date.strftime('%m/%d/%Y')
+        end_str = end_date.strftime('%m/%d/%Y')
+        
+        # Use a restriction to filter by date range - using >= for start and < for end
+        # This ensures we catch events that start on the start date and end before the day after end_date
+        restriction = f"[Start] >= '{start_str}' AND [Start] < '{(end_date + timedelta(days=1)).strftime('%m/%d/%Y')}'"
         filtered_items = items.Restrict(restriction)
         print(f"Items after date restriction: {filtered_items.Count}")
         
@@ -79,6 +84,7 @@ def get_appointments_in_range(calendar_folder, start_date, end_date):
                 
                 # Double-check if in date range
                 if not (start_date <= start_time <= end_date):
+                    print(f"DEBUG: Item outside date range. Item date: {start_time}, Range: {start_date} to {end_date}")
                     current_item = filtered_items.GetNext()
                     continue
                 
@@ -195,6 +201,12 @@ def analyze_work_hours(appointments, exclude_personal=True):
     # Sort by total hours
     category_summary = category_summary.sort_values('Total Hours', ascending=False)
     
+    # Define the correct order of days
+    day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+    
+    # Convert 'Day' to a categorical type with the specified order
+    work_df['Day'] = pd.Categorical(work_df['Day'], categories=day_order, ordered=True)
+    
     # Summary by day
     daily_summary = work_df.groupby(['Date', 'Day'])['Duration'].sum().reset_index()
     daily_summary = daily_summary.sort_values('Date')
@@ -205,7 +217,7 @@ def analyze_work_hours(appointments, exclude_personal=True):
     # Monthly summary
     monthly_summary = work_df.groupby('Month')['Duration'].sum().reset_index()
     
-    # Day of week summary
+    # Day of week summary - now properly ordered
     dow_summary = work_df.groupby('Day')['Duration'].agg(['sum', 'mean']).reset_index()
     dow_summary.columns = ['Day', 'Total Hours', 'Average Hours']
     
@@ -228,25 +240,50 @@ def analyze_work_hours(appointments, exclude_personal=True):
     }
 
 def get_week_dates(year, week_number):
-    # Create a date for the first day of the given year
-    first_day = datetime(year, 1, 1)
-    
-    # Find the first Monday of the year
-    while first_day.weekday() != 0:  # 0 = Monday
-        first_day += timedelta(days=1)
-    
-    # If the first day is already in week 1, adjust week_number
-    first_week = int(first_day.strftime('%W'))
-    if first_week == 1:
-        week_number -= 1
-    
-    # Calculate the start of the requested week
-    start_date = first_day + timedelta(weeks=week_number)
-    
-    # End date is Sunday of that week
-    end_date = start_date + timedelta(days=6, hours=23, minutes=59, seconds=59)
-    
-    return start_date, end_date
+    """
+    Get the start and end dates for a specific ISO week number.
+    ISO weeks start on Monday and end on Sunday.
+    """
+    try:
+        # First day of the year
+        first_day = datetime(year, 1, 1)
+        
+        # Find the first day of week 1
+        # If Jan 1 is not a Monday, go back to the Monday of the previous week
+        days_to_monday = (first_day.weekday()) % 7
+        first_monday = first_day - timedelta(days=days_to_monday)
+        
+        # If Jan 1 is already in week 1 according to ISO
+        if first_day.weekday() <= 3:  # Mon, Tue, Wed, Thu are part of the week containing Jan 1
+            first_week_monday = first_monday
+        else:
+            # Otherwise, the first ISO week starts on the following Monday
+            first_week_monday = first_monday + timedelta(days=7)
+        
+        # Calculate the Monday of the requested week
+        start_date = first_week_monday + timedelta(weeks=week_number-1)
+        
+        # End date is Sunday of that week
+        end_date = start_date + timedelta(days=6, hours=23, minutes=59, seconds=59)
+        
+        return start_date, end_date
+    except Exception as e:
+        print(f"Error calculating week dates: {e}")
+        # Fallback to a simpler method
+        try:
+            # Use the %G-%V-%u format which gives ISO year, ISO week, and ISO weekday
+            # ISO weekday: Monday=1, Sunday=7
+            start_date = datetime.strptime(f'{year}-{week_number}-1', '%G-%V-%u')
+            end_date = start_date + timedelta(days=6, hours=23, minutes=59, seconds=59)
+            return start_date, end_date
+        except Exception as e2:
+            print(f"Error in fallback week calculation: {e2}")
+            # Very basic fallback - approximate
+            jan1 = datetime(year, 1, 1)
+            days_to_add = (week_number-1) * 7
+            start_date = jan1 + timedelta(days=days_to_add)
+            end_date = start_date + timedelta(days=6, hours=23, minutes=59, seconds=59)
+            return start_date, end_date
 
 def main():
     try:
@@ -266,11 +303,17 @@ def main():
             # This week (Monday to Sunday)
             today = now.date()
             start_date = datetime.combine(today - timedelta(days=today.weekday()), datetime.min.time())
-            end_date = now
+            end_date = datetime.combine(start_date + timedelta(days=6), datetime.max.time())
+            print(f"Selected current week: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
         elif option == '2':
             # This month
             start_date = datetime(now.year, now.month, 1)
-            end_date = now
+            # Last day of current month
+            if now.month == 12:
+                end_date = datetime(now.year + 1, 1, 1) - timedelta(seconds=1)
+            else:
+                end_date = datetime(now.year, now.month + 1, 1) - timedelta(seconds=1)
+            print(f"Selected current month: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
         elif option == '3':
             # Custom range
             from_date = input("Start date (YYYY-MM-DD): ")
@@ -278,6 +321,7 @@ def main():
             
             start_date = datetime.strptime(from_date, '%Y-%m-%d')
             end_date = datetime.strptime(to_date, '%Y-%m-%d') + timedelta(days=1) - timedelta(seconds=1)
+            print(f"Selected custom range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
         elif option == '4':
             # Specific week number
             year = int(input("Year (YYYY): ") or now.year)
@@ -289,7 +333,8 @@ def main():
             print("Invalid option. Using current week.")
             today = now.date()
             start_date = datetime.combine(today - timedelta(days=today.weekday()), datetime.min.time())
-            end_date = now
+            end_date = datetime.combine(start_date + timedelta(days=6), datetime.max.time())
+            print(f"Default to current week: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
         
         appointments = get_appointments_in_range(calendar, start_date, end_date)
         
