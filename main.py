@@ -29,36 +29,28 @@ def get_appointments_in_range(calendar_folder, start_date, end_date):
         items.Sort("[Start]")
         items.IncludeRecurrences = True
         
+        # Use a restriction to filter by date range
+        # This helps avoid the infinite loop problem with recurring events
+        restriction = f"[Start] >= '{start_date.strftime('%m/%d/%Y')}' AND [Start] <= '{end_date.strftime('%m/%d/%Y')}'"
+        filtered_items = items.Restrict(restriction)
+        print(f"Items after date restriction: {filtered_items.Count}")
+        
         # DEBUG: Try to get at least one item to verify access
-        if items.Count > 0:
+        if filtered_items.Count > 0:
             try:
-                first_item = items.GetFirst()
-                print(f"DEBUG: First item subject: {first_item.Subject}")
-                print(f"DEBUG: First item start: {first_item.Start}")
+                first_item = filtered_items.GetFirst()
+                print(f"DEBUG: First filtered item subject: {first_item.Subject}")
+                print(f"DEBUG: First filtered item start: {first_item.Start}")
             except Exception as e:
-                print(f"DEBUG: Error accessing first item: {e}")
+                print(f"DEBUG: Error accessing first filtered item: {e}")
         
-        # DEBUG: Get some sample items directly
-        print("\nDEBUG: Sampling calendar items directly (without filter):")
-        sample_count = 0
-        for item in items:
-            try:
-                if sample_count < 5:  # Just check the first 5 items
-                    print(f"DEBUG: Item {sample_count+1}: {item.Subject}, Start: {item.Start}")
-                    sample_count += 1
-                else:
-                    break
-            except Exception as e:
-                print(f"DEBUG: Error accessing sample item: {e}")
-                continue
-        
-        # Use a simpler, more reliable approach - iterate through all items and filter manually
-        print("\nUsing manual filtering approach...")
+        # Process the filtered items
         appointments = []
         processed_count = 0
-        found_count = 0
+        max_items = min(filtered_items.Count, 10000)  # Safety limit
         
-        for item in items:
+        current_item = filtered_items.GetFirst()
+        while current_item and processed_count < max_items:
             processed_count += 1
             if processed_count % 100 == 0:
                 print(f"Processed {processed_count} items...")
@@ -67,11 +59,12 @@ def get_appointments_in_range(calendar_folder, start_date, end_date):
                 # Get the start time
                 start_time = None
                 try:
-                    start_time = item.Start
+                    start_time = current_item.Start
                     if isinstance(start_time, str):
                         start_time = pd.to_datetime(start_time)
                 except Exception as e:
                     print(f"DEBUG: Error getting start time: {e}")
+                    current_item = filtered_items.GetNext()
                     continue
                 
                 # DEBUG: Print date to ensure correct format handling
@@ -90,16 +83,17 @@ def get_appointments_in_range(calendar_folder, start_date, end_date):
                         second=start_time.second
                     )
                 
-                # Check if in date range
+                # Double-check if in date range (belt and suspenders approach)
                 if not (start_date <= start_time <= end_date):
                     if processed_count < 10:
                         print(f"DEBUG: Item outside date range. Item date: {start_time}")
+                    current_item = filtered_items.GetNext()
                     continue
                 
                 # Extract end time
                 end_time = None
                 try:
-                    end_time = item.End
+                    end_time = current_item.End
                     if isinstance(end_time, str):
                         end_time = pd.to_datetime(end_time)
                     
@@ -116,7 +110,7 @@ def get_appointments_in_range(calendar_folder, start_date, end_date):
                 except:
                     # If we can't get end time, estimate it
                     try:
-                        end_time = start_time + timedelta(minutes=item.Duration)
+                        end_time = start_time + timedelta(minutes=current_item.Duration)
                     except:
                         end_time = start_time + timedelta(hours=1)
                 
@@ -125,35 +119,36 @@ def get_appointments_in_range(calendar_folder, start_date, end_date):
                     duration = (end_time - start_time).total_seconds() / 3600
                 except:
                     try:
-                        duration = item.Duration / 60  # Minutes to hours
+                        duration = current_item.Duration / 60  # Minutes to hours
                     except:
                         duration = 1.0  # Default 1 hour
                 
                 # Get category (or set default)
                 try:
-                    category = item.Categories if item.Categories else "Uncategorized"
+                    category = current_item.Categories if current_item.Categories else "Uncategorized"
                 except:
                     category = "Uncategorized"
                 
                 # DEBUG: Print found item
-                print(f"FOUND: {item.Subject}, Start: {start_time}, Duration: {duration:.2f} hours")
+                print(f"FOUND: {current_item.Subject}, Start: {start_time}, Duration: {duration:.2f} hours")
                 
                 # Add to our list
                 appointments.append({
-                    'Subject': item.Subject,
+                    'Subject': current_item.Subject,
                     'Start': start_time,
                     'End': end_time,
                     'Duration': duration,
                     'Category': category
                 })
-                found_count += 1
             except Exception as e:
                 if processed_count < 20:
                     print(f"DEBUG: Error processing item {processed_count}: {e}")
-                continue
+            
+            # Get the next item
+            current_item = filtered_items.GetNext()
         
         print(f"\nTotal items processed: {processed_count}")
-        print(f"Total appointments found in date range: {found_count}")
+        print(f"Total appointments found in date range: {len(appointments)}")
         return appointments
     
     except Exception as e:
