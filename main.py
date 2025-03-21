@@ -30,7 +30,6 @@ def get_appointments_in_range(calendar_folder, start_date, end_date):
         items.IncludeRecurrences = True
         
         # Use a restriction to filter by date range
-        # This helps avoid the infinite loop problem with recurring events
         restriction = f"[Start] >= '{start_date.strftime('%m/%d/%Y')}' AND [Start] <= '{end_date.strftime('%m/%d/%Y')}'"
         filtered_items = items.Restrict(restriction)
         print(f"Items after date restriction: {filtered_items.Count}")
@@ -67,11 +66,6 @@ def get_appointments_in_range(calendar_folder, start_date, end_date):
                     current_item = filtered_items.GetNext()
                     continue
                 
-                # DEBUG: Print date to ensure correct format handling
-                if processed_count < 10:
-                    print(f"DEBUG: Item {processed_count} start_time: {start_time}")
-                    print(f"DEBUG: Type of start_time: {type(start_time)}")
-                
                 # Convert to Python datetime if it's a COM datetime
                 if hasattr(start_time, 'year'):  # Outlook datetime object
                     start_time = datetime(
@@ -83,10 +77,8 @@ def get_appointments_in_range(calendar_folder, start_date, end_date):
                         second=start_time.second
                     )
                 
-                # Double-check if in date range (belt and suspenders approach)
+                # Double-check if in date range
                 if not (start_date <= start_time <= end_date):
-                    if processed_count < 10:
-                        print(f"DEBUG: Item outside date range. Item date: {start_time}")
                     current_item = filtered_items.GetNext()
                     continue
                 
@@ -129,9 +121,6 @@ def get_appointments_in_range(calendar_folder, start_date, end_date):
                 except:
                     category = "Uncategorized"
                 
-                # DEBUG: Print found item
-                print(f"FOUND: {current_item.Subject}, Start: {start_time}, Duration: {duration:.2f} hours")
-                
                 # Add to our list
                 appointments.append({
                     'Subject': current_item.Subject,
@@ -155,7 +144,7 @@ def get_appointments_in_range(calendar_folder, start_date, end_date):
         print(f"Error getting appointments: {e}")
         return []
 
-def analyze_work_hours(appointments):
+def analyze_work_hours(appointments, exclude_personal=True):
     if not appointments:
         return None
         
@@ -179,40 +168,85 @@ def analyze_work_hours(appointments):
     df['Week'] = df['Start'].dt.strftime('%Y-W%U')
     df['Month'] = df['Start'].dt.strftime('%Y-%m')
     
+    # Store complete data before filtering out personal
+    complete_df = df.copy()
+    
+    # Get personal hours info before filtering
+    personal_hours = 0
+    if 'Pessoal' in df['Category'].values:
+        personal_hours = df[df['Category'] == 'Pessoal']['Duration'].sum()
+    
+    # Filter out personal events if requested
+    if exclude_personal:
+        work_df = df[df['Category'] != 'Pessoal']
+    else:
+        work_df = df
+    
+    # Total work hours
+    total_work_hours = work_df['Duration'].sum()
+    
     # Summary by category
-    category_summary = df.groupby('Category')['Duration'].agg(['sum', 'count']).reset_index()
+    category_summary = work_df.groupby('Category')['Duration'].agg(['sum', 'count']).reset_index()
     category_summary.columns = ['Category', 'Total Hours', 'Number of Events']
+    
+    # Add percentage column
+    category_summary['Percentage'] = (category_summary['Total Hours'] / total_work_hours * 100).round(1)
+    
+    # Sort by total hours
     category_summary = category_summary.sort_values('Total Hours', ascending=False)
     
     # Summary by day
-    daily_summary = df.groupby(['Date', 'Day'])['Duration'].sum().reset_index()
+    daily_summary = work_df.groupby(['Date', 'Day'])['Duration'].sum().reset_index()
     daily_summary = daily_summary.sort_values('Date')
     
     # Weekly summary
-    weekly_summary = df.groupby('Week')['Duration'].sum().reset_index()
+    weekly_summary = work_df.groupby('Week')['Duration'].sum().reset_index()
     
     # Monthly summary
-    monthly_summary = df.groupby('Month')['Duration'].sum().reset_index()
+    monthly_summary = work_df.groupby('Month')['Duration'].sum().reset_index()
     
     # Day of week summary
-    dow_summary = df.groupby('Day')['Duration'].agg(['sum', 'mean']).reset_index()
+    dow_summary = work_df.groupby('Day')['Duration'].agg(['sum', 'mean']).reset_index()
     dow_summary.columns = ['Day', 'Total Hours', 'Average Hours']
     
     # Calculate daily average for working days (excluding weekends)
-    working_days = df[~df['Day'].isin(['Saturday', 'Sunday'])]
+    working_days = work_df[~work_df['Day'].isin(['Saturday', 'Sunday'])]
     working_day_avg = working_days.groupby('Date')['Duration'].sum().mean() if not working_days.empty else 0
     
     return {
-        'total_hours': df['Duration'].sum(),
-        'daily_average': df.groupby('Date')['Duration'].sum().mean(),
+        'total_hours': total_work_hours,
+        'personal_hours': personal_hours,
+        'daily_average': work_df.groupby('Date')['Duration'].sum().mean(),
         'working_day_average': working_day_avg,
         'category_summary': category_summary,
         'daily_summary': daily_summary,
         'weekly_summary': weekly_summary,
         'monthly_summary': monthly_summary,
         'day_of_week_summary': dow_summary,
-        'dataframe': df
+        'dataframe': work_df,
+        'complete_dataframe': complete_df
     }
+
+def get_week_dates(year, week_number):
+    # Create a date for the first day of the given year
+    first_day = datetime(year, 1, 1)
+    
+    # Find the first Monday of the year
+    while first_day.weekday() != 0:  # 0 = Monday
+        first_day += timedelta(days=1)
+    
+    # If the first day is already in week 1, adjust week_number
+    first_week = int(first_day.strftime('%W'))
+    if first_week == 1:
+        week_number -= 1
+    
+    # Calculate the start of the requested week
+    start_date = first_day + timedelta(weeks=week_number)
+    
+    # End date is Sunday of that week
+    end_date = start_date + timedelta(days=6, hours=23, minutes=59, seconds=59)
+    
+    return start_date, end_date
 
 def main():
     try:
@@ -220,52 +254,72 @@ def main():
         
         # Ask for date range
         print("\nDate range options:")
-        print("1. Last X days")
-        print("2. This week")
-        print("3. This month")
-        print("4. Custom date range")
+        print("1. This week")
+        print("2. This month")
+        print("3. Custom date range")
+        print("4. Specific week number")
         option = input("Select option (1-4): ")
         
         now = datetime.now()
         
         if option == '1':
-            days = int(input("Number of days to analyze: "))
-            end_date = now
-            start_date = end_date - timedelta(days=days)
-        elif option == '2':
             # This week (Monday to Sunday)
             today = now.date()
             start_date = datetime.combine(today - timedelta(days=today.weekday()), datetime.min.time())
             end_date = now
-        elif option == '3':
+        elif option == '2':
             # This month
             start_date = datetime(now.year, now.month, 1)
             end_date = now
-        else:
+        elif option == '3':
             # Custom range
             from_date = input("Start date (YYYY-MM-DD): ")
             to_date = input("End date (YYYY-MM-DD): ")
             
             start_date = datetime.strptime(from_date, '%Y-%m-%d')
             end_date = datetime.strptime(to_date, '%Y-%m-%d') + timedelta(days=1) - timedelta(seconds=1)
+        elif option == '4':
+            # Specific week number
+            year = int(input("Year (YYYY): ") or now.year)
+            week_num = int(input("Week number (1-52): "))
+            
+            start_date, end_date = get_week_dates(year, week_num)
+            print(f"Selected week {week_num}: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
+        else:
+            print("Invalid option. Using current week.")
+            today = now.date()
+            start_date = datetime.combine(today - timedelta(days=today.weekday()), datetime.min.time())
+            end_date = now
         
         appointments = get_appointments_in_range(calendar, start_date, end_date)
         
         if appointments:
-            results = analyze_work_hours(appointments)
+            # Analyze excluding personal hours by default
+            results = analyze_work_hours(appointments, exclude_personal=True)
             
             if not results:
                 print("Error analyzing appointments.")
                 return
-                
+            
+            # Calculate hours needed to reach 40 (if within current week)
+            hours_left = 0
+            if option == '1':  # Current week
+                if results['total_hours'] < 40:
+                    hours_left = 40 - results['total_hours']
+            
             print("\n===== WORK HOURS SUMMARY =====")
             print(f"Date Range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
-            print(f"Total hours tracked: {results['total_hours']:.2f}")
-            print(f"Daily average: {results['daily_average']:.2f} hours")
+            print(f"Total working hours: {results['total_hours']:.2f}")
+            print(f"Personal hours (excluded from analysis): {results['personal_hours']:.2f}")
+            
+            if hours_left > 0:
+                print(f"Hours needed to reach 40 this week: {hours_left:.2f}")
+                
+            print(f"Daily average (working hours): {results['daily_average']:.2f} hours")
             print(f"Working day average (Mon-Fri): {results['working_day_average']:.2f} hours")
             
             print("\n----- BY CATEGORY -----")
-            print(results['category_summary'].to_string(index=False))
+            print(results['category_summary'][['Category', 'Total Hours', 'Percentage', 'Number of Events']].to_string(index=False))
             
             print("\n----- WEEKLY SUMMARY -----")
             print(results['weekly_summary'].to_string(index=False))
@@ -278,7 +332,8 @@ def main():
                 filename = f"work_hours_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.xlsx"
                 
                 with pd.ExcelWriter(filename) as writer:
-                    results['dataframe'].to_excel(writer, sheet_name='All Events', index=False)
+                    results['dataframe'].to_excel(writer, sheet_name='Work Events', index=False)
+                    results['complete_dataframe'].to_excel(writer, sheet_name='All Events', index=False)
                     results['category_summary'].to_excel(writer, sheet_name='By Category', index=False)
                     results['daily_summary'].to_excel(writer, sheet_name='Daily', index=False)
                     results['weekly_summary'].to_excel(writer, sheet_name='Weekly', index=False)
