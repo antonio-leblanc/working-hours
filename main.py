@@ -3,6 +3,19 @@ from datetime import datetime, timedelta
 import pandas as pd
 import os
 import sys
+import argparse
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description='Analyze working hours from Outlook calendar.')
+    parser.add_argument('-e', '--export', action='store_true', help='Export results to Excel')
+    parser.add_argument('-m', '--mode', type=int, choices=[1, 2, 3, 4], 
+                       help='Date range mode: 1=This week, 2=This month, 3=Custom date range, 4=Specific week')
+    parser.add_argument('-y', '--year', type=int, help='Year for specific week mode')
+    parser.add_argument('-w', '--week', type=int, help='Week number for specific week mode')
+    parser.add_argument('-s', '--start', help='Start date for custom range (YYYY-MM-DD)')
+    parser.add_argument('-t', '--end', help='End date for custom range (YYYY-MM-DD)')
+    
+    return parser.parse_args()
 
 def connect_to_outlook():
     try:
@@ -192,15 +205,15 @@ def analyze_work_hours(appointments, exclude_personal=True):
     
     # Filter out personal events if requested
     if exclude_personal:
-        work_df = df[df['Category'] != 'Pessoal']
+        work_df = df[df['Category'] != 'Pessoal'].copy()  # Create a copy to fix SettingWithCopyWarning
     else:
-        work_df = df
+        work_df = df.copy()  # Create a copy to fix SettingWithCopyWarning
     
     # Total work hours
     total_work_hours = work_df['Duration'].sum()
     
     # Summary by category
-    category_summary = work_df.groupby('Category')['Duration'].agg(['sum', 'count']).reset_index()
+    category_summary = work_df.groupby('Category', observed=True)['Duration'].agg(['sum', 'count']).reset_index()
     category_summary.columns = ['Category', 'Total Hours', 'Number of Events']
     
     # Add percentage column
@@ -213,30 +226,31 @@ def analyze_work_hours(appointments, exclude_personal=True):
     day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
     
     # Convert 'Day' to a categorical type with the specified order
-    work_df['Day'] = pd.Categorical(work_df['Day'], categories=day_order, ordered=True)
+    # Use .loc to avoid SettingWithCopyWarning
+    work_df.loc[:, 'Day'] = pd.Categorical(work_df['Day'], categories=day_order, ordered=True)
     
-    # Summary by day
-    daily_summary = work_df.groupby(['Date', 'Day'])['Duration'].sum().reset_index()
+    # Summary by day - add observed=True to fix FutureWarning
+    daily_summary = work_df.groupby(['Date', 'Day'], observed=True)['Duration'].sum().reset_index()
     daily_summary = daily_summary.sort_values('Date')
     
     # Weekly summary
-    weekly_summary = work_df.groupby('Week')['Duration'].sum().reset_index()
+    weekly_summary = work_df.groupby('Week', observed=True)['Duration'].sum().reset_index()
     
     # Monthly summary
-    monthly_summary = work_df.groupby('Month')['Duration'].sum().reset_index()
+    monthly_summary = work_df.groupby('Month', observed=True)['Duration'].sum().reset_index()
     
-    # Day of week summary - now properly ordered
-    dow_summary = work_df.groupby('Day')['Duration'].agg(['sum', 'mean']).reset_index()
+    # Day of week summary - add observed=True to fix FutureWarning
+    dow_summary = work_df.groupby('Day', observed=True)['Duration'].agg(['sum', 'mean']).reset_index()
     dow_summary.columns = ['Day', 'Total Hours', 'Average Hours']
     
     # Calculate daily average for working days (excluding weekends)
     working_days = work_df[~work_df['Day'].isin(['Saturday', 'Sunday'])]
-    working_day_avg = working_days.groupby('Date')['Duration'].sum().mean() if not working_days.empty else 0
+    working_day_avg = working_days.groupby('Date', observed=True)['Duration'].sum().mean() if not working_days.empty else 0
     
     return {
         'total_hours': total_work_hours,
         'personal_hours': personal_hours,
-        'daily_average': work_df.groupby('Date')['Duration'].sum().mean(),
+        'daily_average': work_df.groupby('Date', observed=True)['Duration'].sum().mean(),
         'working_day_average': working_day_avg,
         'category_summary': category_summary,
         'daily_summary': daily_summary,
@@ -316,17 +330,24 @@ def get_week_dates(year, week_number):
 
 def main():
     try:
+        # Parse command line arguments
+        args = parse_arguments()
+        
         calendar = connect_to_outlook()
         
-        # Ask for date range
-        print("\nDate range options:")
-        print("1. This week")
-        print("2. This month")
-        print("3. Custom date range")
-        print("4. Specific week number")
-        option = input("Select option (1-4): ")
-        
         now = datetime.now()
+        option = "1"  # Default to current week
+        
+        # Determine the date range mode from command line or prompt user
+        if args.mode:
+            option = str(args.mode)
+        else:
+            print("\nDate range options:")
+            print("1. This week")
+            print("2. This month")
+            print("3. Custom date range")
+            print("4. Specific week number")
+            option = input("Select option (1-4): ")
         
         if option == '1':
             # This week (Monday to Sunday)
@@ -348,8 +369,12 @@ def main():
             print(f"Selected current month: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
         elif option == '3':
             # Custom range
-            from_date = input("Start date (YYYY-MM-DD): ")
-            to_date = input("End date (YYYY-MM-DD): ")
+            if args.start and args.end:
+                from_date = args.start
+                to_date = args.end
+            else:
+                from_date = input("Start date (YYYY-MM-DD): ")
+                to_date = input("End date (YYYY-MM-DD): ")
             
             start_date = datetime.strptime(from_date, '%Y-%m-%d')
             # Set end date to the end of the day
@@ -358,8 +383,12 @@ def main():
             print(f"Selected custom range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
         elif option == '4':
             # Specific week number
-            year = int(input("Year (YYYY): ") or now.year)
-            week_num = int(input("Week number (1-52): "))
+            if args.year and args.week:
+                year = args.year
+                week_num = args.week
+            else:
+                year = int(input("Year (YYYY): ") or now.year)
+                week_num = int(input("Week number (1-52): "))
             
             start_date, end_date = get_week_dates(year, week_num)
             print(f"Selected week {week_num}: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
@@ -386,7 +415,7 @@ def main():
                 if results['total_hours'] < 40:
                     hours_left = 40 - results['total_hours']
             
-            print("\n===== WORK HOURS SUMMARY =====")
+            print("\n===== WORK HOURS SUMMARY =====\n")
             print(f"Date Range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
             print(f"Total working hours: {results['total_hours']:.2f}")
             print(f"Personal hours (excluded from analysis): {results['personal_hours']:.2f}")
@@ -406,8 +435,12 @@ def main():
             print("\n----- DAY OF WEEK SUMMARY -----")
             print(results['day_of_week_summary'].to_string(index=False))
             
-            # Ask if user wants to export to Excel
-            if input("\nExport results to Excel? (y/n): ").lower() == 'y':
+            # Check if export is requested via command line arg or ask if not specified
+            export_to_excel = args.export
+            # if not args.export and not args.mode:  # Only ask if not specified via command line
+            #     export_to_excel = input("\nExport results to Excel? (y/n): ").lower() == 'y'
+            
+            if export_to_excel:
                 filename = f"work_hours_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.xlsx"
                 
                 with pd.ExcelWriter(filename) as writer:
