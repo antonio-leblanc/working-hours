@@ -3,6 +3,19 @@ from datetime import datetime, timedelta
 import pandas as pd
 import os
 import sys
+import argparse
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description='Analyze working hours from Outlook calendar.')
+    parser.add_argument('-e', '--export', action='store_true', help='Export results to Excel')
+    parser.add_argument('-m', '--mode', type=int, choices=[1, 2, 3, 4], 
+                       help='Date range mode: 1=This week, 2=This month, 3=Custom date range, 4=Specific week')
+    parser.add_argument('-y', '--year', type=int, help='Year for specific week mode')
+    parser.add_argument('-w', '--week', type=int, help='Week number for specific week mode')
+    parser.add_argument('-s', '--start', help='Start date for custom range (YYYY-MM-DD)')
+    parser.add_argument('-t', '--end', help='End date for custom range (YYYY-MM-DD)')
+    
+    return parser.parse_args()
 
 def connect_to_outlook():
     try:
@@ -29,22 +42,30 @@ def get_appointments_in_range(calendar_folder, start_date, end_date):
         items.Sort("[Start]")
         items.IncludeRecurrences = True
         
-        # Format dates for the Outlook filter
-        start_str = start_date.strftime('%m/%d/%Y')
-        end_str = end_date.strftime('%m/%d/%Y')
+        # Format dates for the Outlook filter using proper formatting
+        # Use the format that Outlook expects: "mm/dd/yyyy hh:mm AM/PM"
+        start_str = start_date.strftime('%m/%d/%Y 12:00 AM')
+        end_str = end_date.strftime('%m/%d/%Y 11:59 PM')
         
-        # Use a restriction to filter by date range - using >= for start and < for end
-        # This ensures we catch events that start on the start date and end before the day after end_date
-        restriction = f"[Start] >= '{start_str}' AND [Start] < '{(end_date + timedelta(days=1)).strftime('%m/%d/%Y')}'"
+        # Use a restriction to filter by date range - using >= for start and <= for end
+        restriction = f"[Start] >= '{start_str}' AND [Start] <= '{end_str}'"
+        print(f"Using filter: {restriction}")
         filtered_items = items.Restrict(restriction)
         print(f"Items after date restriction: {filtered_items.Count}")
+        
+        # Safety check to prevent processing too many items
+        if filtered_items.Count > 10000:
+            print(f"Warning: Very large number of items ({filtered_items.Count}). Limiting to 10000.")
         
         # DEBUG: Try to get at least one item to verify access
         if filtered_items.Count > 0:
             try:
                 first_item = filtered_items.GetFirst()
-                print(f"DEBUG: First filtered item subject: {first_item.Subject}")
-                print(f"DEBUG: First filtered item start: {first_item.Start}")
+                if first_item:
+                    print(f"DEBUG: First filtered item subject: {first_item.Subject}")
+                    print(f"DEBUG: First filtered item start: {first_item.Start}")
+                else:
+                    print("DEBUG: First item is None despite Count > 0")
             except Exception as e:
                 print(f"DEBUG: Error accessing first filtered item: {e}")
         
@@ -83,7 +104,7 @@ def get_appointments_in_range(calendar_folder, start_date, end_date):
                     )
                 
                 # Double-check if in date range
-                if not (start_date <= start_time <= end_date):
+                if not (start_date <= start_time <= end_date + timedelta(days=1)):
                     print(f"DEBUG: Item outside date range. Item date: {start_time}, Range: {start_date} to {end_date}")
                     current_item = filtered_items.GetNext()
                     continue
@@ -184,15 +205,15 @@ def analyze_work_hours(appointments, exclude_personal=True):
     
     # Filter out personal events if requested
     if exclude_personal:
-        work_df = df[df['Category'] != 'Pessoal']
+        work_df = df[df['Category'] != 'Pessoal'].copy()  # Create a copy to fix SettingWithCopyWarning
     else:
-        work_df = df
+        work_df = df.copy()  # Create a copy to fix SettingWithCopyWarning
     
     # Total work hours
     total_work_hours = work_df['Duration'].sum()
     
     # Summary by category
-    category_summary = work_df.groupby('Category')['Duration'].agg(['sum', 'count']).reset_index()
+    category_summary = work_df.groupby('Category', observed=True)['Duration'].agg(['sum', 'count']).reset_index()
     category_summary.columns = ['Category', 'Total Hours', 'Number of Events']
     
     # Add percentage column
@@ -205,30 +226,31 @@ def analyze_work_hours(appointments, exclude_personal=True):
     day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
     
     # Convert 'Day' to a categorical type with the specified order
-    work_df['Day'] = pd.Categorical(work_df['Day'], categories=day_order, ordered=True)
+    # Use .loc to avoid SettingWithCopyWarning
+    work_df.loc[:, 'Day'] = pd.Categorical(work_df['Day'], categories=day_order, ordered=True)
     
-    # Summary by day
-    daily_summary = work_df.groupby(['Date', 'Day'])['Duration'].sum().reset_index()
+    # Summary by day - add observed=True to fix FutureWarning
+    daily_summary = work_df.groupby(['Date', 'Day'], observed=True)['Duration'].sum().reset_index()
     daily_summary = daily_summary.sort_values('Date')
     
     # Weekly summary
-    weekly_summary = work_df.groupby('Week')['Duration'].sum().reset_index()
+    weekly_summary = work_df.groupby('Week', observed=True)['Duration'].sum().reset_index()
     
     # Monthly summary
-    monthly_summary = work_df.groupby('Month')['Duration'].sum().reset_index()
+    monthly_summary = work_df.groupby('Month', observed=True)['Duration'].sum().reset_index()
     
-    # Day of week summary - now properly ordered
-    dow_summary = work_df.groupby('Day')['Duration'].agg(['sum', 'mean']).reset_index()
+    # Day of week summary - add observed=True to fix FutureWarning
+    dow_summary = work_df.groupby('Day', observed=True)['Duration'].agg(['sum', 'mean']).reset_index()
     dow_summary.columns = ['Day', 'Total Hours', 'Average Hours']
     
     # Calculate daily average for working days (excluding weekends)
     working_days = work_df[~work_df['Day'].isin(['Saturday', 'Sunday'])]
-    working_day_avg = working_days.groupby('Date')['Duration'].sum().mean() if not working_days.empty else 0
+    working_day_avg = working_days.groupby('Date', observed=True)['Duration'].sum().mean() if not working_days.empty else 0
     
     return {
         'total_hours': total_work_hours,
         'personal_hours': personal_hours,
-        'daily_average': work_df.groupby('Date')['Duration'].sum().mean(),
+        'daily_average': work_df.groupby('Date', observed=True)['Duration'].sum().mean(),
         'working_day_average': working_day_avg,
         'category_summary': category_summary,
         'daily_summary': daily_summary,
@@ -245,59 +267,87 @@ def get_week_dates(year, week_number):
     ISO weeks start on Monday and end on Sunday.
     """
     try:
-        # First day of the year
-        first_day = datetime(year, 1, 1)
+        # Use the ISO calendar
+        import datetime as dt
+        from datetime import datetime
+        import calendar
         
-        # Find the first day of week 1
-        # If Jan 1 is not a Monday, go back to the Monday of the previous week
-        days_to_monday = (first_day.weekday()) % 7
-        first_monday = first_day - timedelta(days=days_to_monday)
+        # Create a date object for the first day of the specified year
+        january_1 = dt.date(year, 1, 1)
         
-        # If Jan 1 is already in week 1 according to ISO
-        if first_day.weekday() <= 3:  # Mon, Tue, Wed, Thu are part of the week containing Jan 1
-            first_week_monday = first_monday
-        else:
-            # Otherwise, the first ISO week starts on the following Monday
-            first_week_monday = first_monday + timedelta(days=7)
+        # Find the first Monday of the first week of the year
+        # In ISO calendar, week 1 is the first week with at least 4 days in January
+        first_monday = january_1
+        
+        # If January 1 is not a Monday, find the first Monday
+        if january_1.weekday() != 0:  # 0 is Monday in Python
+            # Calculate days until the next Monday
+            days_until_monday = 7 - january_1.weekday()
+            first_monday = january_1 + dt.timedelta(days=days_until_monday)
+            
+            # Check if this is week 1 or week 53 of previous year
+            # If January 1 is after Thursday, it's still part of last year's last week
+            if january_1.weekday() > 3:  # Thursday is 3
+                # If we're asking for week 1, and Jan 1 is after Thursday,
+                # we need to go back to the real first Monday of Week 1
+                if week_number == 1:
+                    first_monday = first_monday - dt.timedelta(days=7)
         
         # Calculate the Monday of the requested week
-        start_date = first_week_monday + timedelta(weeks=week_number-1)
-        
+        start_date = first_monday + dt.timedelta(weeks=week_number-1)
         # End date is Sunday of that week
-        end_date = start_date + timedelta(days=6, hours=23, minutes=59, seconds=59)
+        end_date = start_date + dt.timedelta(days=6)
         
-        return start_date, end_date
+        # Convert to datetime objects with time
+        start_datetime = datetime.combine(start_date, datetime.min.time())
+        end_datetime = datetime.combine(end_date, datetime.max.time())
+        
+        return start_datetime, end_datetime
     except Exception as e:
         print(f"Error calculating week dates: {e}")
-        # Fallback to a simpler method
+        # Fallback method
         try:
-            # Use the %G-%V-%u format which gives ISO year, ISO week, and ISO weekday
-            # ISO weekday: Monday=1, Sunday=7
-            start_date = datetime.strptime(f'{year}-{week_number}-1', '%G-%V-%u')
+            # Simple approach: get the first day of the year and add weeks
+            first_day = datetime(year, 1, 1)
+            # Find Monday of the first week
+            days_to_monday = (first_day.weekday()) % 7
+            first_monday = first_day - timedelta(days=days_to_monday)
+            
+            # Calculate start date (Monday of the specified week)
+            start_date = first_monday + timedelta(weeks=week_number-1)
+            # End date is Sunday
             end_date = start_date + timedelta(days=6, hours=23, minutes=59, seconds=59)
+            
             return start_date, end_date
         except Exception as e2:
             print(f"Error in fallback week calculation: {e2}")
-            # Very basic fallback - approximate
-            jan1 = datetime(year, 1, 1)
-            days_to_add = (week_number-1) * 7
-            start_date = jan1 + timedelta(days=days_to_add)
+            # Last resort fallback
+            today = datetime.now()
+            start_date = today - timedelta(days=today.weekday())
             end_date = start_date + timedelta(days=6, hours=23, minutes=59, seconds=59)
+            print(f"WARNING: Using current week as fallback: {start_date} to {end_date}")
             return start_date, end_date
 
 def main():
     try:
+        # Parse command line arguments
+        args = parse_arguments()
+        
         calendar = connect_to_outlook()
         
-        # Ask for date range
-        print("\nDate range options:")
-        print("1. This week")
-        print("2. This month")
-        print("3. Custom date range")
-        print("4. Specific week number")
-        option = input("Select option (1-4): ")
-        
         now = datetime.now()
+        option = "1"  # Default to current week
+        
+        # Determine the date range mode from command line or prompt user
+        if args.mode:
+            option = str(args.mode)
+        else:
+            print("\nDate range options:")
+            print("1. This week")
+            print("2. This month")
+            print("3. Custom date range")
+            print("4. Specific week number")
+            option = input("Select option (1-4): ")
         
         if option == '1':
             # This week (Monday to Sunday)
@@ -307,25 +357,38 @@ def main():
             print(f"Selected current week: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
         elif option == '2':
             # This month
-            start_date = datetime(now.year, now.month, 1)
-            # Last day of current month
+            start_date = datetime(now.year, now.month, 1, 0, 0, 0)
+            
+            # Calculate the last day of the current month
             if now.month == 12:
-                end_date = datetime(now.year + 1, 1, 1) - timedelta(seconds=1)
+                next_month = datetime(now.year + 1, 1, 1, 0, 0, 0)
             else:
-                end_date = datetime(now.year, now.month + 1, 1) - timedelta(seconds=1)
+                next_month = datetime(now.year, now.month + 1, 1, 0, 0, 0)
+            
+            end_date = next_month - timedelta(seconds=1)
             print(f"Selected current month: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
         elif option == '3':
             # Custom range
-            from_date = input("Start date (YYYY-MM-DD): ")
-            to_date = input("End date (YYYY-MM-DD): ")
+            if args.start and args.end:
+                from_date = args.start
+                to_date = args.end
+            else:
+                from_date = input("Start date (YYYY-MM-DD): ")
+                to_date = input("End date (YYYY-MM-DD): ")
             
             start_date = datetime.strptime(from_date, '%Y-%m-%d')
-            end_date = datetime.strptime(to_date, '%Y-%m-%d') + timedelta(days=1) - timedelta(seconds=1)
+            # Set end date to the end of the day
+            end_date = datetime.strptime(to_date, '%Y-%m-%d')
+            end_date = datetime.combine(end_date.date(), datetime.max.time())
             print(f"Selected custom range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
         elif option == '4':
             # Specific week number
-            year = int(input("Year (YYYY): ") or now.year)
-            week_num = int(input("Week number (1-52): "))
+            if args.year and args.week:
+                year = args.year
+                week_num = args.week
+            else:
+                year = int(input("Year (YYYY): ") or now.year)
+                week_num = int(input("Week number (1-52): "))
             
             start_date, end_date = get_week_dates(year, week_num)
             print(f"Selected week {week_num}: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
@@ -352,7 +415,7 @@ def main():
                 if results['total_hours'] < 40:
                     hours_left = 40 - results['total_hours']
             
-            print("\n===== WORK HOURS SUMMARY =====")
+            print("\n===== WORK HOURS SUMMARY =====\n")
             print(f"Date Range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
             print(f"Total working hours: {results['total_hours']:.2f}")
             print(f"Personal hours (excluded from analysis): {results['personal_hours']:.2f}")
@@ -372,8 +435,12 @@ def main():
             print("\n----- DAY OF WEEK SUMMARY -----")
             print(results['day_of_week_summary'].to_string(index=False))
             
-            # Ask if user wants to export to Excel
-            if input("\nExport results to Excel? (y/n): ").lower() == 'y':
+            # Check if export is requested via command line arg or ask if not specified
+            export_to_excel = args.export
+            # if not args.export and not args.mode:  # Only ask if not specified via command line
+            #     export_to_excel = input("\nExport results to Excel? (y/n): ").lower() == 'y'
+            
+            if export_to_excel:
                 filename = f"work_hours_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.xlsx"
                 
                 with pd.ExcelWriter(filename) as writer:
