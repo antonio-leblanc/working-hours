@@ -213,13 +213,6 @@ def analyze_calendar(start_dt_local, end_dt_local, local_tz):
         items.Sort("[Start]")
         print_debug("Items sorted by [Start].")
 
-        # Note: Using Restrict can be faster *in theory* but often struggles with
-        # date/time conversions, timezones, and recurrences across COM.
-        # Manual filtering after fetching is generally more reliable, though slower.
-        # filter_str = f"[Start] >= '{start_dt_local.strftime('%m/%d/%Y %H:%M %p')}' AND [End] <= '{end_dt_local.strftime('%m/%d/%Y %H:%M %p')}'"
-        # print_debug(f"Filtering with Restrict string (for reference, not actively used): {filter_str}")
-        # restricted_items = items.Restrict(filter_str) # Not using this due to reliability issues
-
     except Exception as e:
         print(f"Error during Outlook setup: {e}")
         print("Please ensure Outlook is running and accessible.")
@@ -242,13 +235,11 @@ def analyze_calendar(start_dt_local, end_dt_local, local_tz):
     start_analysis_time = time.time()
 
     # --- Iterate through ALL items and filter manually ---
-    # This is necessary because Restrict is unreliable with dates/recurrences.
     print_debug("Starting iteration through calendar items (sorted by start date)...")
     for item_index, item in enumerate(items):
         considered_item_count += 1
         if DEBUG and considered_item_count % 100 == 0:
              print_debug(f"Processing item #{considered_item_count}...")
-             # time.sleep(0.01) # Optional: small pause if UI freezes on huge calendars
 
         try:
             # Basic check if item looks like an appointment
@@ -257,72 +248,57 @@ def analyze_calendar(start_dt_local, end_dt_local, local_tz):
                  continue
 
             # --- Timezone Handling ---
-            # Get raw start/end times from Outlook item
             item_start_raw = item.Start
             item_end_raw = item.End
             item_subject = item.Subject # Get subject early for logging
 
-            # Outlook COM times can be timezone-naive. Assume they are in the system's local
-            # time and localize them to the configured LOCAL_TIMEZONE.
             if item_start_raw.tzinfo is None:
                 try:
-                    item_start_local = local_tz.localize(item_start_raw, is_dst=None) # is_dst=None handles ambiguous/non-existent times during DST changes
+                    item_start_local = local_tz.localize(item_start_raw, is_dst=None)
                 except (pytz.exceptions.NonExistentTimeError, pytz.exceptions.AmbiguousTimeError) as tz_err:
                     print(f"WARNING: Skipping item '{item_subject}' due to start time localization error ({item_start_raw}): {tz_err}. Check DST transitions.")
-                    continue # Skip this item
+                    continue
             else:
-                # If already timezone-aware, convert to target local timezone
                 item_start_local = item_start_raw.astimezone(local_tz)
 
             # --- *** IMPORTANT BREAK CONDITION *** ---
-            # If the item's start time is already past the end of our analysis period,
-            # and since items are sorted by start time, we can stop iterating.
-            # This prevents processing unnecessary future events, crucial for recurring items.
             if item_start_local > end_dt_local:
                 print_debug(f"Item '{item_subject}' starts at {item_start_local.strftime('%Y-%m-%d %H:%M')}, which is after the analysis end date {end_dt_local.strftime('%Y-%m-%d %H:%M')}. Stopping iteration.")
-                break # Exit the loop - no further items will be relevant
+                break
 
-            # Process End Time (only needed if we haven't broken out)
+            # Process End Time
             if item_end_raw.tzinfo is None:
                 try:
                     item_end_local = local_tz.localize(item_end_raw, is_dst=None)
                 except (pytz.exceptions.NonExistentTimeError, pytz.exceptions.AmbiguousTimeError) as tz_err:
                     print(f"WARNING: Skipping item '{item_subject}' due to end time localization error ({item_end_raw}): {tz_err}. Check DST transitions.")
-                    continue # Skip this item
+                    continue
             else:
                 item_end_local = item_end_raw.astimezone(local_tz)
-
 
             print_debug(f"\nConsidering item #{considered_item_count}: '{item_subject}'")
             print_debug(f"  Raw Start: {item_start_raw}, Raw End: {item_end_raw}")
             print_debug(f"  Localized Start: {item_start_local.strftime('%Y-%m-%d %H:%M %Z%z')}, Localized End: {item_end_local.strftime('%Y-%m-%d %H:%M %Z%z')}")
 
             # --- Filtering Logic ---
-            # Check if the event *overlaps* with the desired period [start_dt_local, end_dt_local]
-            # Overlap condition: (EventStart < PeriodEnd) and (EventEnd > PeriodStart)
             event_overlaps = (item_start_local < end_dt_local and item_end_local > start_dt_local)
             print_debug(f"  Checking overlap with period: {start_dt_local.strftime('%Y-%m-%d %H:%M')} to {end_dt_local.strftime('%Y-%m-%d %H:%M')}")
             print_debug(f"  Does event overlap? {event_overlaps}")
 
             if event_overlaps:
-                # Calculate the duration *within* the analysis period (clip if needed)
-                # Effective start is the later of event start or period start
                 effective_start = max(item_start_local, start_dt_local)
-                # Effective end is the earlier of event end or period end
                 effective_end = min(item_end_local, end_dt_local)
 
-                # Ensure start is before end after clipping (handles edge cases)
                 if effective_start < effective_end:
                     duration = effective_end - effective_start
                     print_debug(f"  Event overlaps. Effective Start in period: {effective_start.strftime('%Y-%m-%d %H:%M')}")
                     print_debug(f"  Effective End in period:   {effective_end.strftime('%Y-%m-%d %H:%M')}")
                     print_debug(f"  Calculated Duration within period: {duration}")
 
-                    processed_event_count += 1 # Count events that overlap and have duration
+                    processed_event_count += 1
 
                     # --- Category Handling ---
                     categories_raw = item.Categories if hasattr(item, 'Categories') else ""
-                    # Split categories, strip whitespace, remove empty entries
                     categories = [c.strip() for c in categories_raw.split(';') if c.strip()]
                     print_debug(f"  Categories: {categories} (Raw: '{categories_raw}')")
 
@@ -330,25 +306,18 @@ def analyze_calendar(start_dt_local, end_dt_local, local_tz):
                     print_debug(f"  Is personal ('{PERSONAL_CATEGORY}')? {is_personal}")
 
                     # --- Accumulate Durations ---
-                    # Use effective_start date to determine the day for daily totals
-                    day_of_week = effective_start.weekday() # Monday = 0, Sunday = 6
+                    day_of_week = effective_start.weekday()
 
                     if is_personal:
                         total_personal_duration += duration
                         print_debug(f"  Adding {format_timedelta(duration)} to personal total.")
-                        # Optional: Track personal time by category if needed later
-                        # first_category = categories[0] if categories else "Uncategorized Personal"
-                        # category_durations[first_category] += duration # Example if needed
                     else:
-                        # This is a work event (not marked as PERSONAL_CATEGORY)
                         total_work_duration += duration
                         daily_durations[day_of_week] += duration
                         print_debug(f"  Adding {format_timedelta(duration)} to WORK total and day {day_of_week}.")
 
-                        # Track work hours per category (excluding the personal category itself)
-                        first_work_category = "Uncategorized" # Default if no categories or only personal found
+                        first_work_category = "Uncategorized"
                         if categories:
-                            # Find the first category that isn't the personal one
                             found_work_cat = False
                             for cat in categories:
                                 if cat != PERSONAL_CATEGORY:
@@ -356,35 +325,27 @@ def analyze_calendar(start_dt_local, end_dt_local, local_tz):
                                     found_work_cat = True
                                     break
                             if not found_work_cat:
-                                # This case should be rare if is_personal logic is correct,
-                                # but handles items categorized *only* as "Pessoal".
-                                # We treat it as Uncategorized work here, although arguably it could be skipped.
-                                print_debug(f"  Item only had personal category '{PERSONAL_CATEGORY}', but was not flagged as personal? Check logic. Treating as Uncategorized work.")
-                                first_work_category = "Uncategorized" # Explicitly set
+                                print_debug(f"  Item only had personal category '{PERSONAL_CATEGORY}', treating as Uncategorized work.")
+                                first_work_category = "Uncategorized"
 
                         category_durations[first_work_category] += duration
                         print_debug(f"  Adding {format_timedelta(duration)} to work category '{first_work_category}'.")
 
-                        # Track which *actual work days* (Mon-Fri) had work entries
-                        if 0 <= day_of_week <= 4: # Monday to Friday
+                        if 0 <= day_of_week <= 4:
                              work_days_in_period.add(effective_start.date())
                              print_debug(f"  Added {effective_start.date()} to set of work days with entries.")
                 else:
                     print_debug("  Duration is zero or negative after clipping to period, skipping.")
-                    continue # Skip events that only touch the boundary but have no duration inside
+                    continue
 
         except AttributeError as ae:
-            # Handle items that might not have expected properties (e.g., meeting requests not accepted?)
             item_subject_err = getattr(item, 'Subject', 'N/A')
             print_debug(f"Skipping item #{considered_item_count} ('{item_subject_err}') due to AttributeError: {ae}. Might not be a standard appointment.")
-            pass # Continue to the next item
+            pass
         except (pytz.exceptions.NonExistentTimeError, pytz.exceptions.AmbiguousTimeError) as tz_err:
-             # Catch errors already handled during time localization, just log if needed again
              item_subject_err = getattr(item, 'Subject', 'N/A')
              print_debug(f"Item '{item_subject_err}' was skipped earlier due to timezone error: {tz_err}")
-             # Already skipped with `continue` above, this is just for potential debug path analysis
         except Exception as e:
-            # Catch other potential errors with specific items
             item_subject_err = getattr(item, 'Subject', 'N/A')
             print(f"\n--- ERROR processing item #{considered_item_count} ---")
             print(f"Subject: '{item_subject_err}'")
@@ -392,12 +353,11 @@ def analyze_calendar(start_dt_local, end_dt_local, local_tz):
                 print(f"Start: {getattr(item, 'Start', 'N/A')}, End: {getattr(item, 'End', 'N/A')}")
                 print(f"Categories: {getattr(item, 'Categories', 'N/A')}")
             except:
-                print("Could not retrieve item details.") # Protect against errors getting details
+                print("Could not retrieve item details.")
             print(f"Error Type: {type(e).__name__}")
             print(f"Error Message: {e}")
             print("Continuing analysis with next item...")
             print_debug("----------------------------------------")
-            # Consider adding more robust error reporting or option to stop
 
     end_analysis_time = time.time()
     print_debug(f"\nFinished iterating through items. Total items considered: {considered_item_count}.")
@@ -413,20 +373,21 @@ def analyze_calendar(start_dt_local, end_dt_local, local_tz):
     print_debug(f"Total Work Duration (non-{PERSONAL_CATEGORY}, includes Uncategorized): {total_work_duration} ({format_timedelta(total_work_duration)})")
     print_debug(f"Total Personal Duration ({PERSONAL_CATEGORY}): {total_personal_duration} ({format_timedelta(total_personal_duration)})")
     print_debug("Category Durations (Work Time Only):")
-    for cat, dur in sorted(category_durations.items()): # Sort for consistent debug output
+    for cat, dur in sorted(category_durations.items()):
         print_debug(f"  - {cat}: {dur} ({format_timedelta(dur)})")
     print_debug("Daily Durations (Work Time Only, 0=Mon):")
-    for day in sorted(daily_durations.keys()): # Sort for consistent debug output
+    for day in sorted(daily_durations.keys()):
          dur = daily_durations[day]
          print_debug(f"  - Day {day}: {dur} ({format_timedelta(dur)})")
     print_debug(f"Unique work days (Mon-Fri) with entries: {len(work_days_in_period)} days")
-    print_debug(f"Work days set: {sorted(list(work_days_in_period))}") # Sort for consistent debug output
+    print_debug(f"Work days set: {sorted(list(work_days_in_period))}")
     print_debug("--- End Raw Totals ---")
 
     return total_work_duration, total_personal_duration, category_durations, daily_durations, len(work_days_in_period)
 
+# <<< MODIFIED Function >>>
 def display_results(period_name, start_dt, end_dt, total_work, total_personal, categories, dailies, num_work_days_with_entries):
-    """Formats and prints the analysis results."""
+    """Formats and prints the analysis results, including percentages."""
     print("\n--- Outlook Calendar Analysis ---")
     print(f"Period: {period_name}")
     print(f"From:   {start_dt.strftime('%Y-%m-%d %H:%M %Z')}")
@@ -434,13 +395,17 @@ def display_results(period_name, start_dt, end_dt, total_work, total_personal, c
     print(f"Timezone: {LOCAL_TIMEZONE}")
     print("---------------------------------")
 
-    print(f"Total Work Hours:       {format_timedelta(total_work)}")
+    # Format total work and personal durations
+    total_work_formatted = format_timedelta(total_work)
+    total_personal_formatted = format_timedelta(total_personal)
+    total_work_seconds = total_work.total_seconds() # Needed for percentage calculation
+
+    print(f"Total Work Hours:       {total_work_formatted}")
     if total_personal > datetime.timedelta(0) or PERSONAL_CATEGORY in categories:
-         # Show personal hours line if there were personal events OR if the category exists even with 0 hours tracked (for clarity)
-        print(f"Total Personal Hours:   {format_timedelta(total_personal)} (Category: '{PERSONAL_CATEGORY}')")
+        print(f"Total Personal Hours:   {total_personal_formatted} (Category: '{PERSONAL_CATEGORY}')")
     print("---------------------------------")
 
-    print("Work Hours by Specific Category:")
+    print("Work Hours by Specific Category (% of Total Work Hours):")
     # Filter out both the personal category and "Uncategorized" for this specific breakdown
     work_categories_filtered = {k: v for k, v in categories.items()
                                 if k != PERSONAL_CATEGORY and k != "Uncategorized" and v > datetime.timedelta(0)}
@@ -448,17 +413,28 @@ def display_results(period_name, start_dt, end_dt, total_work, total_personal, c
     if work_categories_filtered:
         # Sort categories alphabetically for consistent output
         for category, duration in sorted(work_categories_filtered.items()):
-            print(f"  - {category}: {format_timedelta(duration)}")
+            percentage = 0.0
+            if total_work_seconds > 0: # Avoid division by zero
+                percentage = (duration.total_seconds() / total_work_seconds) * 100
+            # Print category, formatted duration, and calculated percentage
+            print(f"  - {category}: {format_timedelta(duration)} ({percentage:.1f}%)")
     else:
-        print("  (No time recorded under specific work categories)")
+         # Only print this if there's actually work time, otherwise it's obvious
+         if total_work_seconds > 0:
+            print("  (No time recorded under specific work categories)")
 
-    # Optionally, explicitly show the 'Uncategorized' work time if it exists
+    # Explicitly show the 'Uncategorized' work time and its percentage if it exists
     uncategorized_duration = categories.get("Uncategorized", datetime.timedelta(0))
     if uncategorized_duration > datetime.timedelta(0):
-         print(f"  - Uncategorized Work: {format_timedelta(uncategorized_duration)}")
+        uncat_percentage = 0.0
+        if total_work_seconds > 0: # Avoid division by zero
+            uncat_percentage = (uncategorized_duration.total_seconds() / total_work_seconds) * 100
+        print(f"  - Uncategorized Work: {format_timedelta(uncategorized_duration)} ({uncat_percentage:.1f}%)")
 
-    # Add explanation about the total
-    print(f"\nNote: 'Total Work Hours' includes all non-'{PERSONAL_CATEGORY}' time, including 'Uncategorized'.")
+    # Add explanation about the total if there was categorized or uncategorized time shown
+    if work_categories_filtered or uncategorized_duration > datetime.timedelta(0):
+        print(f"\nNote: 'Total Work Hours' ({total_work_formatted}) is the base (100%) for category percentages.")
+        print(f"      It includes all non-'{PERSONAL_CATEGORY}' time.")
 
 
     print("---------------------------------")
@@ -472,21 +448,17 @@ def display_results(period_name, start_dt, end_dt, total_work, total_personal, c
         print(f"  - {days[i]}: {format_timedelta(duration)}")
         total_daily_check += duration
     # Sanity check: Sum of daily totals should equal total work hours
-    if not math.isclose(total_daily_check.total_seconds(), total_work.total_seconds(), rel_tol=1e-5):
-         print_debug(f"WARNING: Sum of daily hours ({format_timedelta(total_daily_check)}) doesn't match total work hours ({format_timedelta(total_work)})! Check logic.")
+    if not math.isclose(total_daily_check.total_seconds(), total_work_seconds, rel_tol=1e-5):
+         print_debug(f"WARNING: Sum of daily hours ({format_timedelta(total_daily_check)}) doesn't match total work hours ({total_work_formatted})! Check logic.")
 
     print("---------------------------------")
 
     # --- Calculate Averages ---
-    # Number of calendar days in the period
     num_days_in_period = (end_dt.date() - start_dt.date()).days + 1
-
-    # Calculate number of potential working days (Mon-Fri) within the selected period
     potential_working_days = 0
     current_day = start_dt.date()
     end_period_date = end_dt.date()
     while current_day <= end_period_date:
-        # Check if the day's weekday() is between 0 (Monday) and 4 (Friday)
         if 0 <= current_day.weekday() <= 4:
             potential_working_days += 1
         current_day += datetime.timedelta(days=1)
@@ -495,33 +467,25 @@ def display_results(period_name, start_dt, end_dt, total_work, total_personal, c
     print_debug(f"Calculated {potential_working_days} potential working days (Mon-Fri) in period.")
     print_debug(f"Detected {num_work_days_with_entries} actual working days (Mon-Fri) with logged work time.")
 
-
-    # Calculate average work hours per day across the entire period
     avg_hours_per_day = total_work / num_days_in_period if num_days_in_period > 0 else datetime.timedelta()
-
-    # Calculate average work hours per potential Mon-Fri working day in the period
     avg_hours_per_potential_working_day = total_work / potential_working_days if potential_working_days > 0 else datetime.timedelta()
-
-    # Calculate average work hours based *only* on the Mon-Fri days where work was actually logged
     avg_hours_per_actual_working_day = total_work / num_work_days_with_entries if num_work_days_with_entries > 0 else datetime.timedelta()
-
 
     print("Averages (Based on Total Work Hours):")
     print(f"  - Avg / Day (all {num_days_in_period} days in period):           {format_timedelta(avg_hours_per_day)}")
     print(f"  - Avg / Potential Work Day (Mon-Fri in period): {format_timedelta(avg_hours_per_potential_working_day)} ({potential_working_days} potential days)")
     print(f"  - Avg / Actual Worked Day (Mon-Fri w/ entries): {format_timedelta(avg_hours_per_actual_working_day)} ({num_work_days_with_entries} days with entries)")
     print("---------------------------------\n")
+# <<< End of MODIFIED Function >>>
 
 
 # --- Main Execution ---
 if __name__ == "__main__":
     # --- Optional: Global Exception Handler for Debugging ---
     def handle_exception(exc_type, exc_value, exc_traceback):
-        # Let KeyboardInterrupt (Ctrl+C) behave normally
         if issubclass(exc_type, KeyboardInterrupt):
             sys.__excepthook__(exc_type, exc_value, exc_traceback)
             return
-        # Log other exceptions to stderr
         print("\n--- UNHANDLED EXCEPTION CAUGHT ---", file=sys.stderr)
         print(f"Type: {exc_type.__name__}", file=sys.stderr)
         print(f"Value: {exc_value}", file=sys.stderr)
@@ -529,48 +493,40 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exception(exc_type, exc_value, exc_traceback, file=sys.stderr)
         print("--- END UNHANDLED EXCEPTION ---\n", file=sys.stderr)
-        # If DEBUG is on, pause before exiting to allow reading the error
         if DEBUG:
              input("Press Enter to exit after viewing the error...")
-        sys.exit(1) # Exit after logging the exception
+        sys.exit(1)
 
     # Uncomment the next line to enable the global exception handler
     # sys.excepthook = handle_exception
 
-    args = parse_arguments() # Parse args early to check for --debug flag
+    args = parse_arguments()
     local_tz = get_local_timezone()
 
-    start_dt, end_dt, period_name = (None, None, None) # Initialize
+    start_dt, end_dt, period_name = (None, None, None)
 
-    # Determine time period based on args or interactive input
-    if args.period or args.year or args.week: # If any relevant args were provided
+    if args.period or args.year or args.week:
          print_debug("Using command-line arguments for period selection.")
          start_dt, end_dt, period_name = get_time_period_from_args(args, local_tz)
     else:
          print_debug("No period arguments provided, using interactive selection.")
          start_dt, end_dt, period_name = get_time_period_interactive(local_tz)
 
-    # Proceed only if valid dates were determined
     if start_dt and end_dt:
         try:
-            # Call the main analysis function
             total_w, total_p, cats, days, work_days_count = analyze_calendar(start_dt, end_dt, local_tz)
-            # Display the results
             display_results(period_name, start_dt, end_dt, total_w, total_p, cats, days, work_days_count)
         except Exception as main_e:
-            # Catch unexpected errors during the core analysis or display
             print(f"\n--- An unexpected error occurred during the main process ---")
             print(f"Error Type: {type(main_e).__name__}")
             print(f"Error Message: {main_e}")
             print("----------------------------------------------------------")
-            # Provide more detail if DEBUG is enabled
             if DEBUG:
                  import traceback
                  print("Traceback:")
                  traceback.print_exc()
-            sys.exit(1) # Exit with an error code
+            sys.exit(1)
     else:
-         # This should only happen if date calculation failed, which usually exits earlier
          print("Error: Could not determine valid start and end dates for analysis. Exiting.")
          sys.exit(1)
 
